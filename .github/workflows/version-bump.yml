@@ -3,19 +3,12 @@ name: version-bump
 # #18 (B) — auto-bump the edge software version on every push to main (V7).
 # SoT = git tags (vX.Y). The bump RECORDS the new version by creating + pushing an
 # annotated tag — NO write-back to main (no pyproject edit), so it can never loop.
-#
-# No-recursion (two independent safeguards):
-#   1. the trigger is `branches: [main]` (refs/heads/main); this job pushes a
-#      `refs/tags/vX.Y` ref, which CANNOT match a branch-push trigger; AND
-#   2. pushes made with the default GITHUB_TOKEN do not spawn new workflow runs.
-#   ⇒ Do NOT add `tags:` to the trigger and do NOT swap GITHUB_TOKEN for a PAT
-#     without re-evaluating recursion.
 on:
   push:
     branches: [main]
 
 permissions:
-  contents: write   # needed to push the new tag
+  contents: write
 
 jobs:
   bump:
@@ -23,38 +16,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # full history + ALL tags must be visible to compute the base
-
+          fetch-depth: 0
       - name: Compute next version + record it as a tag
         env:
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.event.after }}
         run: |
           set -euo pipefail
-
-          # --- current base from the latest vX.Y tag (V5: none → seed 0.1, no bump) ---
+          # Idempotency: if HEAD already carries a vX.Y tag (e.g. a "Re-run all jobs" on an
+          # already-bumped push), do nothing — never mint a phantom version on re-run.
+          if git describe --exact-match --match 'v[0-9]*.[0-9]*' --tags HEAD >/dev/null 2>&1; then
+            echo "HEAD already versioned ($(git describe --exact-match --tags HEAD)) — skipping"
+            exit 0
+          fi
           LATEST=$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+$' | head -n1 || true)
           if [ -z "$LATEST" ]; then
             NEXT="0.1"; RANGE="<seed>"; REASON="no tag yet → V5 start 0.1 (seed)"
           else
             v=${LATEST#v}; X=${v%%.*}; Y=${v#*.}
-
-            # --- the commits THIS push introduced (max-over-range, not just HEAD) ---
-            # squash-merge collapses a PR to one commit (its subject = PR title); a
-            # 'Merge pull request' commit has no conv-commit prefix. Scanning the whole
-            # BEFORE..AFTER range keeps the individual feat:/fix: commits visible.
+            # BEFORE..AFTER only for a genuine fast-forward push; on a force-push /
+            # rewritten history (BEFORE not an ancestor of AFTER) fall back to since-last-tag.
             if [ "$BEFORE" != "0000000000000000000000000000000000000000" ] \
-               && git rev-parse --quiet --verify "${BEFORE}^{commit}" >/dev/null 2>&1; then
+               && git rev-parse --quiet --verify "${BEFORE}^{commit}" >/dev/null 2>&1 \
+               && git merge-base --is-ancestor "$BEFORE" "$AFTER"; then
               RANGE="${BEFORE}..${AFTER}"
             else
-              RANGE="${LATEST}..${AFTER}"   # first push to a fresh branch / force-push
+              RANGE="${LATEST}..${AFTER}"
             fi
             SUBJECTS=$(git log --format='%s' "$RANGE" || true)
             BODIES=$(git log --format='%b' "$RANGE" || true)
-
-            # HIGHEST signal wins: ANY feat OR any breaking marker (type!: or
-            # 'BREAKING CHANGE') anywhere in the range → X (reset Y); else → Y
-            # (covers fix/perf/refactor/docs/chore AND the no-signal default, V6).
+            # HIGHEST signal wins (max-over-range): any feat OR breaking marker → X (reset Y);
+            # else → Y (fix/perf/refactor/docs/chore AND the no-signal default, V6).
             if echo "$SUBJECTS" | grep -qiE '^feat(\([^)]+\))?!?:' \
                || echo "$SUBJECTS" | grep -qiE '^[a-z]+(\([^)]+\))?!:' \
                || echo "$BODIES"  | grep -qiE 'BREAKING[ -]CHANGE'; then
@@ -64,20 +56,9 @@ jobs:
             fi
             NEXT="${X}.${Y}"
           fi
-
           SHA=$(git rev-parse --short=7 HEAD)
           echo "AUTO-VERSION  decision=[${REASON}]  range=[${RANGE}]  ->  ${NEXT}+${SHA}  (tag v${NEXT})"
-          echo "next=${NEXT}" >> "$GITHUB_OUTPUT"
-          {
-            echo "## Auto-version"
-            echo "- range: \`${RANGE}\`"
-            echo "- decision: ${REASON}"
-            echo "- **version: \`${NEXT}+${SHA}\`**  (tag \`v${NEXT}\`)"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          # --- record via the SoT (annotated tag). In the real edge repo the next
-          #     step would build/deploy with --build-arg VOLTPULSE_VERSION=${NEXT}+${SHA}
-          #     (the existing build-time bake), so the images report this exact value. ---
+          { echo "## Auto-version"; echo "- ${REASON}"; echo "- **${NEXT}+${SHA}** (tag v${NEXT})"; } >> "$GITHUB_STEP_SUMMARY"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "v${NEXT}" -m "Release ${NEXT} [auto: ${REASON}]"
