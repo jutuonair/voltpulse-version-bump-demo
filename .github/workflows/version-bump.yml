@@ -66,6 +66,7 @@ jobs:
           fi
 
           SHA=$(git rev-parse --short=7 HEAD)
+          echo "AUTO-VERSION  decision=[${REASON}]  range=[${RANGE}]  ->  ${NEXT}+${SHA}  (tag v${NEXT})"
           echo "next=${NEXT}" >> "$GITHUB_OUTPUT"
           {
             echo "## Auto-version"
